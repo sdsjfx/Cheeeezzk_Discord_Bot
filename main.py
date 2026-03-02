@@ -277,7 +277,7 @@ async def check_loop():
             if is_live and changes:
 
                 embed = discord.Embed(
-                    title=f"{channel_name} 방송 정보 변경",
+                    title=f"{channel_name}님의 방송 정보가 변경되었습니다!",
                     url=f"https://chzzk.naver.com/live/{channel_id}",
                     color=16776960
                 )
@@ -290,7 +290,7 @@ async def check_loop():
                 for name, old, new in changes:
                     embed.add_field(
                         name=name,
-                        value=f"이전:\n{old or '없음'}\n\n현재:\n{new or '없음'}",
+                        value=f"```\n이전:\n{old or '없음'}\n현재:\n{new or '없음'}\n",
                         inline=False
                     )
 
@@ -368,10 +368,14 @@ async def setchannel(interaction: discord.Interaction):
 
 @tree.command(name="login", description="네이버 쿠키값(NID_AUT, NID_SES)을 입력받아 로그인을 합니다.")
 async def login(interaction: discord.Interaction, nid_aut: str, nid_ses: str):
-    config["NID_AUT"] = nid_aut
-    config["NID_SES"] = nid_ses
+    await interaction.response.defer(ephemeral=True)
+    config["NID_AUT"] = nid_aut.strip()
+    config["NID_SES"] = nid_ses.strip()
     save_json(CONFIG_FILE, config)
-    await interaction.response.send_message("로그인 정보 저장 완료", ephemeral=True)
+    await interaction.followup.send(
+        "로그인이 완료되었습니다.\n이제부터 팔로우 방송을 확인하여 알림을 보내줍니다.",
+        ephemeral=True
+    )
 
 @tree.command(name="logout", description="/login으로 입력한 쿠키값을 초기화하여 로그아웃합니다.")
 async def logout(interaction: discord.Interaction):
