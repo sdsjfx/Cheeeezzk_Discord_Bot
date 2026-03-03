@@ -104,6 +104,9 @@ async def fetch_live_detail(channel_id):
 async def fetch_followings():
     global session
 
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
     if not config["NID_AUT"] or not config["NID_SES"]:
         print("로그인 정보 없음")
         return None
@@ -412,10 +415,5 @@ async def on_ready():
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
     asyncio.create_task(check_loop())
-
-@client.event
-async def on_disconnect():
-    if session:
-        await session.close()
 
 client.run(TOKEN)
