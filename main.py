@@ -187,7 +187,7 @@ async def check_loop():
             # 🔴 방송 중일 때만 detail 호출
             # =========================
             detail = None
-            if is_live:
+            if {is_live} or {not is_live and was_live}:
                 detail = await fetch_live_detail(channel_id)
                 if not detail:
                     continue
