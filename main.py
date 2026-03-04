@@ -1,3 +1,5 @@
+# dev version _ V1.1.2
+
 import discord
 from discord import app_commands
 from datetime import datetime, timezone, timedelta
@@ -196,7 +198,7 @@ async def check_loop():
                     continue
 
                 title = detail.get("liveTitle")
-                category = detail.get("liveCategoryValue") or ""
+                category = detail.get("liveCategoryValue") or "없음"
                 tags = detail.get("tags") or []
                 thumbnail = detail.get("liveImageUrl")
                 open_date_str = detail.get("openDate")
@@ -293,7 +295,7 @@ async def check_loop():
                 for name, old, new in changes:
                     embed.add_field(
                         name=name,
-                        value=f"```\n이전:\n{old or '없음'}\n현재:\n{new or '없음'}\n",
+                        value=f"```\n이전:\n{old or '없음'}\n현재:\n{new or '없음'}\n```",
                         inline=False
                     )
 
