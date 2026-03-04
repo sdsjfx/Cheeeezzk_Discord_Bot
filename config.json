@@ -1,6 +1,7 @@
 {
     "notify_channel": "",
-    "streamers":{},
+    "streamers": {
+    },
     "NID_AUT": "",
     "NID_SES": ""
 }
