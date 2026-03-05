@@ -4,3 +4,4 @@
 stable버전은 [여기](https://github.com/sdsjfx/Cheeeezzk_Discord_Bot/tree/main)에서 확인하실 수 있습니다.
 
 ## dev _ 업데이트 로그
+V1.1.1 : 콘솔 로그 강화
