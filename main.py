@@ -1,4 +1,4 @@
-# dev version _ V1.1.2
+# stable version _ V1.1
 
 import discord
 from discord import app_commands
