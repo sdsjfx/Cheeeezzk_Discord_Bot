@@ -9,7 +9,7 @@
 /setchannel  
 <자세한 설명은 /help 사용해주세요>
 
-**코드의 대부분은 ChatGPT가 작성**했으며, 오류 발생시 ISSUE작성 부탁드립니다.
+**코드의 대부분은 ChatGPT가 작성**했으며, 오류 발생시 Issue작성 부탁드립니다.
 
 ## 업데이트 로그
 
@@ -33,7 +33,8 @@ V1.0 : 기능적인 부분 완성
 config.json 노출시에 발생되는 일들은 책임지지 않습니다.
 
 **Cheeeezzk Discord Bot는 치지직 비공식api를 사용**하며,  
-임의로 CHECK_INTERVAL를 줄여서 발생되는 일들은 책임지지 않습니다.  
+임의로 CHECK_INTERVAL(default:60)을 줄여서 발생되는 일들은 책임지지 않습니다.  
+**공식api에서 현재 팔로우중인 목록을 불러오는 기능은 없으므로,** 비공식api의 사용이 불가피함을 알립니다.
 
 Cheeeezzk Discord Bot은 치지직 또는 네이버에서 운영하지 않습니다.
 
