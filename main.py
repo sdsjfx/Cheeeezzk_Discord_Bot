@@ -1,4 +1,4 @@
-# stable version _ V1.1
+# dev version _ V1.1.1
 
 import discord
 from discord import app_commands
@@ -137,6 +137,8 @@ async def fetch_followings():
             timeout=15
         ) as resp:
 
+            now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n----{now_time}----")
             print("API STATUS:", resp.status)
 
             if resp.status != 200:
@@ -260,6 +262,7 @@ async def check_loop():
                 embed.timestamp = discord.utils.utcnow()
 
                 await channel.send(embed=embed)
+                print(f"**{channel_name}** 라이브 시작")
 
             # =========================
             # 🔵 방송 정보 변경
@@ -303,6 +306,7 @@ async def check_loop():
                 embed.timestamp = discord.utils.utcnow()
 
                 await channel.send(embed=embed)
+                print(f"**{channel_name}** 방송정보변경")
 
             # =========================
             # ⚫ 방송 종료
@@ -349,6 +353,7 @@ async def check_loop():
                 )
                 embed.timestamp = discord.utils.utcnow()
                 await channel.send(embed=embed)
+                print(f"**{channel_name}** 라이브 종료")
 
             # =========================
             # 상태 저장
@@ -417,5 +422,15 @@ async def on_ready():
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
     asyncio.create_task(check_loop())
+
+@client.event
+async def on_guild_join(guild):
+	print(f"{guild} 서버에 초대됨")
+	return
+
+@client.event
+async def on_guild_leave(guild):
+	print(f"{guild} 서버에서 추방됨")
+	return
 
 client.run(TOKEN)
