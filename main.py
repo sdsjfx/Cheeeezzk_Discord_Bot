@@ -1,4 +1,4 @@
-# dev version _ V1.1.1
+# dev version _ V1.1.2
 
 import discord
 from discord import app_commands
@@ -25,13 +25,23 @@ kst = timezone(timedelta(hours=9))
 
 def load_json(path, default):
     if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
+        save_json(path, default)
         return default
+
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
+            data = json.load(f)
+
+        # 누락된 키 자동 추가
+        for key in default:
+            if key not in data:
+                data[key] = default[key]
+
+        return data
+
+    except Exception as e:
+        print(f"{path} 로딩 실패 → 초기화:", e)
+        save_json(path, default)
         return default
 
 def save_json(path, data):
@@ -60,6 +70,28 @@ state = load_json(STATE_FILE, {
     "last_tags": {}
 })
 
+default_config = {
+    "notify_channel": None,
+    "NID_AUT": None,
+    "NID_SES": None
+}
+
+# config.json 누락된 키 자동 생성 및 타입 보정
+for key, value in default_config.items():
+    if key not in config:
+        config[key] = value
+if not isinstance(config["notify_channel"], (int, type(None))):
+    config["notify_channel"] = None
+if not isinstance(config["NID_AUT"], (str, type(None))):
+    config["NID_AUT"] = None
+if not isinstance(config["NID_SES"], (str, type(None))):
+    config["NID_SES"] = None
+
+# state.json 누락된 키 자동 생성
+for key in ["last_live", "last_title", "last_category", "last_tags"]:
+    if key not in state or not isinstance(state[key], dict):
+        state[key] = {}
+
 # -------------------------
 # Discord
 # -------------------------
@@ -75,6 +107,11 @@ session = None  # 전역 세션 재사용
 # -------------------------
 
 async def fetch_live_detail(channel_id):
+    global session
+
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
     url = f"https://api.chzzk.naver.com/service/v2/channels/{channel_id}/live-detail"
 
     headers = {
@@ -194,14 +231,16 @@ async def check_loop():
             # 🔴 방송 중일 때만 detail 호출
             # =========================
             detail = None
-            if {is_live} or {not is_live and was_live}:
+            if is_live or (not is_live and was_live):
                 detail = await fetch_live_detail(channel_id)
                 if not detail:
                     continue
 
                 title = detail.get("liveTitle")
                 category = detail.get("liveCategoryValue") or "없음"
-                tags = detail.get("tags") or []
+                tags = detail.get("tags")
+                if not isinstance(tags, list):
+                    tags = []
                 thumbnail = detail.get("liveImageUrl")
                 open_date_str = detail.get("openDate")
                 close_date_str = detail.get("closeDate")
@@ -230,8 +269,9 @@ async def check_loop():
             # 🟢 방송 시작
             # =========================
             if is_live and not was_live:
-                open_ts = to_unix_kst(open_date_str)
-
+                open_ts = None
+                if open_date_str:
+                    open_ts = to_unix_kst(open_date_str)
                 embed = discord.Embed(
                     title=title,
                     url=f"https://chzzk.naver.com/live/{channel_id}",
@@ -243,11 +283,21 @@ async def check_loop():
                     url=f"https://chzzk.naver.com/{channel_id}",
                     icon_url=channel_icon
                 )
-                embed.add_field(name="카테고리", value=category, inline=True)
-                if opendate:
+                embed.add_field(
+                    name="카테고리",
+                    value=category,
+                    inline=True
+                    )
+                if open_ts:
                     embed.add_field(
                         name="방송 시작 시간",
                         value=f"<t:{open_ts}:t>",
+                        inline=True
+                    )
+                else:
+                    embed.add_field(
+                        name="방송 시작 시간",
+                        value="시간 정보 없음",
                         inline=True
                     )
                 if tags:
@@ -315,13 +365,18 @@ async def check_loop():
                 detail = await fetch_live_detail(channel_id)
                 if not detail:
                     continue
-                open_ts = to_unix_kst(open_date_str)
-                close_ts = to_unix_kst(close_date_str)
-                uptime_seconds = close_ts - open_ts
-                hours, remainder = divmod(uptime_seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                uptime_str = f"{hours}시간 {minutes}분 {seconds}초"
-                value=f"<t:{open_ts}:t> ~ <t:{close_ts}:t>"
+                open_ts = None
+                close_ts = None
+                if open_date_str and close_date_str:
+                    open_ts = to_unix_kst(open_date_str)
+                    close_ts = to_unix_kst(close_date_str)
+                    uptime_seconds = close_ts - open_ts
+                    hours, remainder = divmod(uptime_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    uptime_str = f"{hours}시간 {minutes}분 {seconds}초"
+                    value=f"<t:{open_ts}:t> ~ <t:{close_ts}:t>"
+                else:
+                    uptime_str,value = "시간 정보 없음"
 
                 embed = discord.Embed(
                     title=f"{channel_name}님의 방송이 종료되었습니다!",
