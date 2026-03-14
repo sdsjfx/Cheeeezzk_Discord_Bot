@@ -5,4 +5,7 @@ stable버전은 [여기](https://github.com/sdsjfx/Cheeeezzk_Discord_Bot/tree/ma
 
 ## dev _ 업데이트 로그
 V1.1.1 : 콘솔 로그 강화  
-V1.1.2 : json, api관련 예외처리 및 live-detail 호출 방식 버그 수정
+V1.1.2 : json, api관련 예외처리 및 live-detail 호출 방식 버그 수정  
+V1.1.3 : api주소변경(+ /live) (그에따라 로직 변경) 및 notification 켜져있는 스트리머만 알림 표시 및 CHECK_INTERVAL 정확도 향상 [no_github]
+V1.1.3 _ edit 1 : 오류수정
+V1.1.4 : 오류수정실패에 따라 V1.1.3 변경 삭제 후 V1.1.2버전으로 V1.1.3의 변경사항 작업
