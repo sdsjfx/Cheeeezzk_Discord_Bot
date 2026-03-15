@@ -1,4 +1,4 @@
-# stable version _ V1.1
+# dev version _ V1.1.4
 
 import discord
 from discord import app_commands
@@ -25,22 +25,27 @@ kst = timezone(timedelta(hours=9))
 
 def load_json(path, default):
     if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=4, ensure_ascii=False)
+        save_json(path, default)
         return default
+
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
+            data = json.load(f)
+
+        for key in default:
+            if key not in data:
+                data[key] = default[key]
+
+        return data
+
+    except Exception as e:
+        print(f"{path} 로딩 실패 → 초기화:", e)
+        save_json(path, default)
         return default
 
 def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
-
-def parse_kst_datetime(dt_str: str):
-    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    return dt.replace(tzinfo=kst)
 
 def to_unix_kst(dt_str: str):
     dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
@@ -60,6 +65,28 @@ state = load_json(STATE_FILE, {
     "last_tags": {}
 })
 
+default_config = {
+    "notify_channel": None,
+    "NID_AUT": None,
+    "NID_SES": None
+}
+
+# config.json 누락된 키 자동 생성 및 타입 보정
+for key, value in default_config.items():
+    if key not in config:
+        config[key] = value
+if not isinstance(config["notify_channel"], (int, type(None))):
+    config["notify_channel"] = None
+if not isinstance(config["NID_AUT"], (str, type(None))):
+    config["NID_AUT"] = None
+if not isinstance(config["NID_SES"], (str, type(None))):
+    config["NID_SES"] = None
+
+# state.json 누락된 키 자동 생성
+for key in ["last_live", "last_title", "last_category", "last_tags"]:
+    if key not in state or not isinstance(state[key], dict):
+        state[key] = {}
+
 # -------------------------
 # Discord
 # -------------------------
@@ -68,13 +95,18 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-session = None  # 전역 세션 재사용
+session = None
 
 # -------------------------
 # live-detail v2 호출
 # -------------------------
 
 async def fetch_live_detail(channel_id):
+    global session
+
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
     url = f"https://api.chzzk.naver.com/service/v2/channels/{channel_id}/live-detail"
 
     headers = {
@@ -100,10 +132,10 @@ async def fetch_live_detail(channel_id):
         return None
 
 # -------------------------
-# followings 호출
+# followings/live 호출
 # -------------------------
 
-async def fetch_followings():
+async def fetch_live_followings():
     global session
 
     if session is None or session.closed:
@@ -121,22 +153,13 @@ async def fetch_followings():
         "Cookie": f"NID_AUT={config['NID_AUT']}; NID_SES={config['NID_SES']}"
     }
 
-    url = "https://api.chzzk.naver.com/service/v1/channels/followings"
+    url = "https://api.chzzk.naver.com/service/v1/channels/followings/live"
 
     try:
-        async with session.get(
-            url,
-            params={
-                "page": 0,
-                "size": 505,
-                "sortType": "FOLLOW",
-                "subscription": "False",
-                "followerCount": "False",
-            },
-            headers=headers,
-            timeout=15
-        ) as resp:
+        async with session.get(url, headers=headers, timeout=15) as resp:
 
+            now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n----{now_time}----")
             print("API STATUS:", resp.status)
 
             if resp.status != 200:
@@ -146,7 +169,6 @@ async def fetch_followings():
             print("API CODE:", data.get("code"))
 
             if data.get("code") != 200:
-                print("API ERROR:", data)
                 return None
 
             return data["content"]["followingList"]
@@ -163,72 +185,68 @@ async def check_loop():
     await client.wait_until_ready()
 
     while not client.is_closed():
+        loop_start = datetime.now()
 
         if not config.get("notify_channel"):
             await asyncio.sleep(CHECK_INTERVAL)
             continue
 
-        following_list = await fetch_followings()
+        live_list = await fetch_live_followings()
 
-        if not following_list:
+        if live_list is None:
             await asyncio.sleep(CHECK_INTERVAL)
             continue
 
-        channel = client.get_channel(config["notify_channel"])
-        if not channel:
+        disc_channel = client.get_channel(config["notify_channel"])
+        if not disc_channel:
             await asyncio.sleep(CHECK_INTERVAL)
             continue
 
-        for item in following_list:
+        # 루프 시작 전 이전 방송 중 목록 확정
+        previous_live_ids = set(
+            cid for cid, live in state["last_live"].items() if live
+        )
 
+        current_live_ids = set()
+
+        for item in live_list:
             channel_id = item["channelId"]
+            notification = item["channel"]["personalData"]["following"]["notification"]
+
+            # 알림 꺼진 스트리머는 current에만 추가하고 건너뜀
+            if not notification:
+                current_live_ids.add(channel_id)
+                continue
+
             channel_name = item["channel"]["channelName"]
             channel_icon = item["channel"].get("channelImageUrl")
+            live_info = item.get("liveInfo", {})
 
-            is_live = item.get("streamer", {}).get("openLive", False)
+            title = live_info.get("liveTitle")
+            category = live_info.get("liveCategoryValue") or "없음"
+
             was_live = state["last_live"].get(channel_id, False)
-
-            # =========================
-            # 🔴 방송 중일 때만 detail 호출
-            # =========================
-            detail = None
-            if {is_live} or {not is_live and was_live}:
-                detail = await fetch_live_detail(channel_id)
-                if not detail:
-                    continue
-
-                title = detail.get("liveTitle")
-                category = detail.get("liveCategoryValue") or "없음"
-                tags = detail.get("tags") or []
-                thumbnail = detail.get("liveImageUrl")
-                open_date_str = detail.get("openDate")
-                close_date_str = detail.get("closeDate")
-
-                if open_date_str and close_date_str:
-                    opendate = parse_kst_datetime(open_date_str)
-                    closedate = parse_kst_datetime(close_date_str)
-
-                if thumbnail:
-                    thumbnail = thumbnail.replace("{type}", "720")
-
-                if open_date_str:
-                    opendate = parse_kst_datetime(open_date_str)
-                else:
-                    opendate = None
-            else:
-                title = None
-                category = None
-                tags = []
-
-            old_title = state["last_title"].get(channel_id)
-            old_category = state["last_category"].get(channel_id)
-            old_tags = state["last_tags"].get(channel_id, [])
+            current_live_ids.add(channel_id)
 
             # =========================
             # 🟢 방송 시작
             # =========================
-            if is_live and not was_live:
-                open_ts = to_unix_kst(open_date_str)
+            if not was_live:
+                # detail 호출 (tags, thumbnail, 시작시간)
+                detail = await fetch_live_detail(channel_id)
+                tags = []
+                thumbnail = None
+                open_ts = None
+
+                if detail:
+                    raw_tags = detail.get("tags")
+                    tags = raw_tags if isinstance(raw_tags, list) else []
+                    thumbnail = detail.get("liveImageUrl")
+                    if thumbnail:
+                        thumbnail = thumbnail.replace("{type}", "720")
+                    open_date_str = detail.get("openDate")
+                    if open_date_str:
+                        open_ts = to_unix_kst(open_date_str)
 
                 embed = discord.Embed(
                     title=title,
@@ -242,55 +260,62 @@ async def check_loop():
                     icon_url=channel_icon
                 )
                 embed.add_field(name="카테고리", value=category, inline=True)
-                if opendate:
-                    embed.add_field(
-                        name="방송 시작 시간",
-                        value=f"<t:{open_ts}:t>",
-                        inline=True
-                    )
+                if open_ts:
+                    embed.add_field(name="방송 시작 시간", value=f"<t:{open_ts}:t>", inline=True)
+                else:
+                    embed.add_field(name="방송 시작 시간", value="시간 정보 없음", inline=True)
                 if tags:
-                    embed.add_field(
-                        name="태그",
-                        value=", ".join(tags),
-                        inline=False
-                    )
+                    embed.add_field(name="태그", value=", ".join(tags), inline=False)
                 if thumbnail:
                     embed.set_image(url=thumbnail)
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                await channel.send(embed=embed)
+                await disc_channel.send(embed=embed)
+                print(f"**{channel_name}** 라이브 시작")
+
+                # 상태 저장 후 continue (변경 알림 중복 방지)
+                state["last_live"][channel_id] = True
+                state["last_title"][channel_id] = title
+                state["last_category"][channel_id] = category
+                state["last_tags"][channel_id] = tags
+                continue
 
             # =========================
             # 🔵 방송 정보 변경
             # =========================
+            old_title = state["last_title"].get(channel_id)
+            old_category = state["last_category"].get(channel_id)
+            old_tags = state["last_tags"].get(channel_id, [])
+
+            title_changed = title != old_title
+            category_changed = category != old_category
+
+            # 제목/카테고리 변경 시에만 detail 호출해서 tags 확인
+            tags = old_tags
+            if title_changed or category_changed:
+                detail = await fetch_live_detail(channel_id)
+                if detail:
+                    raw_tags = detail.get("tags")
+                    tags = raw_tags if isinstance(raw_tags, list) else []
+
+            tags_changed = sorted(old_tags) != sorted(tags)
+
             changes = []
+            if title_changed:
+                changes.append(("제목", old_title, title))
+            if category_changed:
+                changes.append(("카테고리", old_category, category))
+            if tags_changed:
+                changes.append(("태그", ", ".join(old_tags), ", ".join(tags)))
 
-            if is_live:
-                if title != old_title:
-                    changes.append(("제목", old_title, title))
-
-                if category != old_category:
-                    changes.append(("카테고리", old_category, category))
-
-                if sorted(old_tags) != sorted(tags):
-                    changes.append(("태그",
-                        ", ".join(old_tags),
-                        ", ".join(tags)
-                    ))
-
-            if is_live and changes:
-
+            if changes:
                 embed = discord.Embed(
                     title=f"{channel_name}님의 방송 정보가 변경되었습니다!",
                     url=f"https://chzzk.naver.com/live/{channel_id}",
                     color=16776960
                 )
-
-                embed.set_author(
-                    name=channel_name,
-                    icon_url=channel_icon
-                )
+                embed.set_author(name=channel_name, icon_url=channel_icon)
 
                 for name, old, new in changes:
                     embed.add_field(
@@ -302,22 +327,40 @@ async def check_loop():
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                await channel.send(embed=embed)
+                await disc_channel.send(embed=embed)
+                print(f"**{channel_name}** 방송정보변경")
 
-            # =========================
-            # ⚫ 방송 종료
-            # =========================
-            if not is_live and was_live:
-                detail = await fetch_live_detail(channel_id)
-                if not detail:
-                    continue
-                open_ts = to_unix_kst(open_date_str)
-                close_ts = to_unix_kst(close_date_str)
-                uptime_seconds = close_ts - open_ts
-                hours, remainder = divmod(uptime_seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                uptime_str = f"{hours}시간 {minutes}분 {seconds}초"
-                value=f"<t:{open_ts}:t> ~ <t:{close_ts}:t>"
+            # 상태 저장
+            state["last_live"][channel_id] = True
+            state["last_title"][channel_id] = title
+            state["last_category"][channel_id] = category
+            state["last_tags"][channel_id] = tags
+
+        # =========================
+        # ⚫ 방송 종료
+        # =========================
+        ended_streams = previous_live_ids - current_live_ids
+
+        for channel_id in ended_streams:
+            detail = await fetch_live_detail(channel_id)
+
+            if detail:
+                channel_name = detail.get("channel", {}).get("channelName", "알 수 없음")
+                channel_icon = detail.get("channel", {}).get("channelImageUrl")
+                open_date_str = detail.get("openDate")
+                close_date_str = detail.get("closeDate")
+
+                if open_date_str and close_date_str:
+                    open_ts = to_unix_kst(open_date_str)
+                    close_ts = to_unix_kst(close_date_str)
+                    uptime_seconds = close_ts - open_ts
+                    hours, remainder = divmod(uptime_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    uptime_str = f"{hours}시간 {minutes}분 {seconds}초"
+                    value = f"<t:{open_ts}:t> ~ <t:{close_ts}:t>"
+                else:
+                    uptime_str = "시간 정보 없음"
+                    value = "시간 정보 없음"
 
                 embed = discord.Embed(
                     title=f"{channel_name}님의 방송이 종료되었습니다!",
@@ -325,41 +368,25 @@ async def check_loop():
                     description=f"**{channel_name}** 님이 라이브를 종료했습니다!",
                     color=16718891
                 )
-                # Author
                 embed.set_author(
                     name=channel_name,
                     url=f"https://chzzk.naver.com/{channel_id}",
-                    icon_url=item["channel"].get("channelImageUrl")
+                    icon_url=channel_icon
                 )
-                # 방송 시간
-                embed.add_field(
-                    name="방송 시간",
-                    value=value,
-                    inline=True
-                )
-                # 업타임
-                embed.add_field(
-                    name="업타임",
-                    value=uptime_str,
-                    inline=True
-                )
-                # Footer
-                embed.set_footer(
-                    text="Cheeeezzk"
-                )
+                embed.add_field(name="방송 시간", value=value, inline=True)
+                embed.add_field(name="업타임", value=uptime_str, inline=True)
+                embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
-                await channel.send(embed=embed)
 
-            # =========================
-            # 상태 저장
-            # =========================
-            state["last_live"][channel_id] = is_live
-            state["last_title"][channel_id] = title
-            state["last_category"][channel_id] = category
-            state["last_tags"][channel_id] = tags
+                await disc_channel.send(embed=embed)
+                print(f"**{channel_name}** 라이브 종료")
+
+            state["last_live"][channel_id] = False
 
         save_json(STATE_FILE, state)
-        await asyncio.sleep(CHECK_INTERVAL)
+        elapsed = (datetime.now() - loop_start).total_seconds()
+        sleep_time = max(1, CHECK_INTERVAL - elapsed)
+        await asyncio.sleep(sleep_time)
 
 # -------------------------
 # 명령어
@@ -417,5 +444,15 @@ async def on_ready():
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
     asyncio.create_task(check_loop())
+
+@client.event
+async def on_guild_join(guild):
+    print(f"{guild} 서버에 초대됨")
+    return
+
+@client.event
+async def on_guild_leave(guild):
+    print(f"{guild} 서버에서 추방됨")
+    return
 
 client.run(TOKEN)
