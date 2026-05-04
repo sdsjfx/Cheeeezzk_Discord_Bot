@@ -1,4 +1,5 @@
-# dev_version _ V1.2.1
+version = "dev_version \_ V1.2.2"
+
 
 import discord
 from discord import app_commands
@@ -96,6 +97,40 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 session = None
+
+# -------------------------
+# 계정 정보 호출
+# -------------------------
+
+async def login_account_info():
+    global session
+
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
+    url = "https://comm-api.game.naver.com/nng_main/v1/user/getUserStatus"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json",
+        "Referer": "https://chzzk.naver.com/",
+        "Origin": "https://game.naver.com",
+        "Cookie": f"NID_AUT={config['NID_AUT']}; NID_SES={config['NID_SES']}"
+    }
+
+    try:
+        async with session.get(url, headers=headers, timeout=15) as resp:
+            if resp.status != 200:
+                return None
+
+            data = await resp.json()
+            if data.get("code") != 200:
+                return None
+
+            return data.get("content", {})
+    except Exception as e:
+        print("LOGIN ACCOUNT INFO ERROR:", e)
+        return None
 
 # -------------------------
 # live-detail v2 호출
@@ -232,7 +267,6 @@ async def check_loop():
             # 🟢 방송 시작
             # =========================
             if not was_live:
-                # detail 호출 (tags, thumbnail, 시작시간)
                 detail = await fetch_live_detail(channel_id)
                 tags = []
                 thumbnail = None
@@ -274,7 +308,6 @@ async def check_loop():
                 await disc_channel.send(embed=embed)
                 print(f"**{channel_name}** 라이브 시작")
 
-                # 상태 저장 후 continue (변경 알림 중복 방지)
                 state["last_live"][channel_id] = True
                 state["last_title"][channel_id] = title
                 state["last_category"][channel_id] = category
@@ -291,7 +324,6 @@ async def check_loop():
             title_changed = title != old_title
             category_changed = category != old_category
 
-            # 제목/카테고리 변경 시에만 detail 호출해서 tags 확인
             tags = old_tags
             if title_changed or category_changed:
                 detail = await fetch_live_detail(channel_id)
@@ -330,7 +362,6 @@ async def check_loop():
                 await disc_channel.send(embed=embed)
                 print(f"**{channel_name}** 방송정보변경")
 
-            # 상태 저장
             state["last_live"][channel_id] = True
             state["last_title"][channel_id] = title
             state["last_category"][channel_id] = category
@@ -392,13 +423,13 @@ async def check_loop():
 # 명령어
 # -------------------------
 
-@tree.command(name="setchannel", description="현재 채널로 알림 채널이 설정됩니다.")
+@tree.command(name="채널설정", description="현재 채널로 알림 채널이 설정됩니다.")
 async def setchannel(interaction: discord.Interaction):
     config["notify_channel"] = interaction.channel_id
     save_json(CONFIG_FILE, config)
     await interaction.response.send_message("현재 채널 알림 채널 설정 완료", ephemeral=True)
 
-@tree.command(name="login", description="네이버 쿠키값(NID_AUT, NID_SES)을 입력받아 로그인을 합니다.")
+@tree.command(name="로그인", description="네이버 쿠키값을 입력받아 로그인을 합니다.")
 async def login(interaction: discord.Interaction, nid_aut: str, nid_ses: str):
     await interaction.response.defer(ephemeral=True)
     config["NID_AUT"] = nid_aut.strip()
@@ -409,31 +440,77 @@ async def login(interaction: discord.Interaction, nid_aut: str, nid_ses: str):
         ephemeral=True
     )
 
-@tree.command(name="logout", description="/login으로 입력한 쿠키값을 초기화하여 로그아웃합니다.")
+@tree.command(name="정보", description="로그인 정보와 현재 디스코드 봇의 버전을 확인합니다.")
+async def info(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    # 쿠키가 아예 없는 경우
+    if not config.get("NID_AUT") or not config.get("NID_SES"):
+        embed = discord.Embed(
+            title="Cheeeezzk 정보",
+            color=16718891
+        )
+        embed.add_field(name="로그인 상태", value="로그인되지 않음", inline=False)
+        embed.add_field(name="버전", value=version, inline=False)
+        embed.set_footer(text="Cheeeezzk")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+
+    content = await login_account_info()
+
+    if not content or not content.get("loggedIn"):
+        embed = discord.Embed(
+            title="Cheeeezzk 정보",
+            color=16718891
+        )
+        embed.add_field(name="로그인 상태", value="로그인되지 않음\n(쿠키가 만료되었을 수 있습니다)", inline=False)
+        embed.add_field(name="버전", value=version, inline=False)
+        embed.set_footer(text="Cheeeezzk")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+
+    nickname = content.get("nickname", "알 수 없음")
+    profile_image = content.get("profileImageUrl")
+
+    embed = discord.Embed(
+        title="Cheeeezzk 정보",
+        color=65441
+    )
+    embed.add_field(name="로그인 상태", value="로그인됨", inline=False)
+    embed.add_field(name="닉네임", value=nickname, inline=False)
+    embed.add_field(name="버전", value=version, inline=False)
+    if profile_image:
+        embed.set_thumbnail(url=profile_image)
+    embed.set_footer(text="Cheeeezzk")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@tree.command(name="로그아웃", description="현재 로그인 되어있는 계정을 로그아웃합니다.")
 async def logout(interaction: discord.Interaction):
-    config["NID_AUT"] = ""
-    config["NID_SES"] = ""
+    config["NID_AUT"] = None
+    config["NID_SES"] = None
     save_json(CONFIG_FILE, config)
     await interaction.response.send_message("로그아웃이 완료되었습니다.\n다시 로그인을 하기 전까지 알림이 전송되지 않습니다.", ephemeral=True)
 
-@tree.command(name="help", description="명령어들의 자세한 사용법을 알려줍니다.")
+@tree.command(name="도움말", description="명령어들의 자세한 사용법을 알려줍니다.")
 async def help(interaction: discord.Interaction):
     await interaction.response.send_message("""### Cheeeezzk 디스코드 봇 명령어 사용법:
-</setchannel:1476850149614555257> : 명령어를 친 채널에 알림을 보내줍니다.
+</채널설정:1483808551423049844> : 명령어를 친 채널에 알림을 보내줍니다.
 
 
-</login:1476912741511073896> : 네이버 쿠키값을 입력받아 로그인을 합니다.
+</로그인:1483808551423049845> : 네이버 쿠키값을 입력받아 로그인을 합니다.
 네이버 쿠키값 입력하는 방법:
 1. 원하는 계정을 치지직에서 로그인한 후, F12를 눌러 개발자 도구를 엽니다.
 2. 상단에 Application을 누른후, 좌측에 Cookies를 더블클릭한 후 아래에 뜨는 https:​//chzzk.naver.com 을 클릭합니다.
-3. NID_AUT와 NID_SES을 /login 명령어에 각각 입력합니다.
+3. NID_AUT와 NID_SES을 /로그인 명령어에 각각 입력합니다.
 
 
-</logout:1477662585028477120> : /login으로 입력받은 네이버 쿠키값을 초기화하여 로그아웃합니다.
+</로그아웃:1483808551423049847> : /로그인 으로 입력받은 네이버 쿠키값을 초기화하여 로그아웃합니다.
 다시 로그인을 하기 전까지 알림이 전송되지 않습니다.
 
+</정보:1483808551423049846> : 로그인한 계정을 보여줍니다.
 
-</help:1477662585028477121> : 지금 이 메시지를 다시 봅니다.""", ephemeral=True)
+</도움말:1483808551913787392> : 지금 이 메시지를 다시 봅니다.""", ephemeral=True)
 
 # -------------------------
 
