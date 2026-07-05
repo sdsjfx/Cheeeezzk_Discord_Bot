@@ -1,4 +1,4 @@
-version = "dev_version \_ V1.2.2"
+version = "dev\_version \_ V1.2.3"
 
 
 import discord
@@ -14,6 +14,7 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))
+CM_CHECK_INTERVAL = int(os.getenv("CM_CHECK_INTERVAL", 300))
 
 CONFIG_FILE = "config.json"
 STATE_FILE = "state.json"
@@ -49,9 +50,64 @@ def save_json(path, data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 def to_unix_kst(dt_str: str):
-    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    if "-" in dt_str:
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    else:
+        dt = datetime.strptime(dt_str, "%Y%m%d%H%M%S")
     dt = dt.replace(tzinfo=kst)
     return int(dt.timestamp())
+
+
+def extract_live_event_key(item, detail=None):
+    if not isinstance(item, dict):
+        return None
+
+    candidates = []
+    if detail and isinstance(detail, dict):
+        candidates.append(detail.get("liveId"))
+        live_info = detail.get("liveInfo")
+        if isinstance(live_info, dict):
+            candidates.append(live_info.get("liveId"))
+
+    live_info = item.get("liveInfo")
+    if isinstance(live_info, dict):
+        candidates.append(live_info.get("liveId"))
+
+    candidates.append(item.get("liveId"))
+
+    for candidate in candidates:
+        if candidate not in (None, ""):
+            return str(candidate)
+
+    return None
+
+
+def build_action_view(channel_id, include_live=False, replay_url=None, replay_disabled=False):
+    view = discord.ui.View(timeout=None)
+    if include_live:
+        view.add_item(
+            discord.ui.Button(
+                label="방송보기",
+                url=f"https://chzzk.naver.com/live/{channel_id}",
+                style=discord.ButtonStyle.link
+            )
+        )
+    view.add_item(
+        discord.ui.Button(
+            label="다시보기",
+            url=replay_url or f"https://chzzk.naver.com/{channel_id}",
+            style=discord.ButtonStyle.link,
+            disabled=replay_disabled
+        )
+    )
+    view.add_item(
+        discord.ui.Button(
+            label="채널로 가기",
+            url=f"https://chzzk.naver.com/{channel_id}",
+            style=discord.ButtonStyle.link
+        )
+    )
+    return view
 
 config = load_json(CONFIG_FILE, {
     "notify_channel": None,
@@ -63,7 +119,10 @@ state = load_json(STATE_FILE, {
     "last_live": {},
     "last_title": {},
     "last_category": {},
-    "last_tags": {}
+    "last_tags": {},
+    "last_live_event_id": {},
+    "replay_tracking": {},
+    "community_seen_comments": []
 })
 
 default_config = {
@@ -84,9 +143,11 @@ if not isinstance(config["NID_SES"], (str, type(None))):
     config["NID_SES"] = None
 
 # state.json 누락된 키 자동 생성
-for key in ["last_live", "last_title", "last_category", "last_tags"]:
+for key in ["last_live", "last_title", "last_category", "last_tags", "last_live_event_id", "replay_tracking"]:
     if key not in state or not isinstance(state[key], dict):
         state[key] = {}
+if "community_seen_comments" not in state or not isinstance(state["community_seen_comments"], list):
+    state["community_seen_comments"] = []
 
 # -------------------------
 # Discord
@@ -195,13 +256,13 @@ async def fetch_live_followings():
 
             now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"\n----{now_time}----")
-            print("API STATUS:", resp.status)
+            print("LIVE API STATUS:", resp.status)
 
             if resp.status != 200:
                 return None
 
             data = await resp.json()
-            print("API CODE:", data.get("code"))
+            print("LIVE API CODE:", data.get("code"))
 
             if data.get("code") != 200:
                 return None
@@ -209,8 +270,85 @@ async def fetch_live_followings():
             return data["content"]["followingList"]
 
     except Exception as e:
-        print("FETCH ERROR:", e)
+        print("LIVE FETCH ERROR:", e)
         return None
+
+
+async def fetch_community_posts():
+    global session
+
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
+    if not config["NID_AUT"] or not config["NID_SES"]:
+        print("로그인 정보 없음")
+        return None
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json",
+        "Referer": "https://chzzk.naver.com/",
+        "Origin": "https://chzzk.naver.com",
+        "Cookie": f"NID_AUT={config['NID_AUT']}; NID_SES={config['NID_SES']}"
+    }
+
+    url = "https://api.chzzk.naver.com/service/v1/home/following/channel-post"
+
+    try:
+        async with session.get(url, headers=headers, timeout=15) as resp:
+
+            now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n----{now_time}----")
+            print("COMMUNITY API STATUS:", resp.status)
+
+            if resp.status != 200:
+                return None
+
+            data = await resp.json()
+            print("COMMUNITY API CODE:", data.get("code"))
+
+            if data.get("code") != 200:
+                return None
+
+            return data.get("content", {}).get("channelPosts", [])
+
+    except Exception as e:
+        print("COMMUNITY FETCH ERROR:", e)
+        return None
+
+
+async def fetch_replay_videos(channel_id):
+    global session
+
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
+    if not config["NID_AUT"] or not config["NID_SES"]:
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "application/json",
+        "Referer": "https://chzzk.naver.com/",
+        "Origin": "https://chzzk.naver.com",
+        "Cookie": f"NID_AUT={config['NID_AUT']}; NID_SES={config['NID_SES']}"
+    }
+
+    url = f"https://api.chzzk.naver.com/service/v1/channels/{channel_id}/videos?sortType=LATEST"
+
+    try:
+        async with session.get(url, headers=headers, timeout=15) as resp:
+            if resp.status != 200:
+                return []
+
+            data = await resp.json()
+            if data.get("code") != 200:
+                return []
+
+            return data.get("content", {}).get("data", [])
+    except Exception as e:
+        print("REPLAY FETCH ERROR:", e)
+        return []
 
 # -------------------------
 # 체크 루프
@@ -236,6 +374,68 @@ async def check_loop():
         if not disc_channel:
             await asyncio.sleep(CHECK_INTERVAL)
             continue
+
+        now_ts = int(datetime.now().timestamp())
+        replay_tracking = state.get("replay_tracking", {})
+        for channel_id, tracker in list(replay_tracking.items()):
+            expires_at = tracker.get("expires_at", 0)
+            if expires_at <= now_ts:
+                replay_tracking.pop(channel_id, None)
+                continue
+
+            if tracker.get("activated"):
+                replay_tracking.pop(channel_id, None)
+                continue
+
+            if tracker.get("wait_until") and now_ts < tracker["wait_until"]:
+                continue
+
+            replay_videos = await fetch_replay_videos(channel_id)
+            if not replay_videos:
+                continue
+
+            seen_ids = set(tracker.get("seen_video_ids", []))
+            for item in replay_videos:
+                if item.get("videoType") != "REPLAY":
+                    continue
+
+                video_id = item.get("videoId")
+                if not video_id or video_id in seen_ids:
+                    continue
+
+                replay_url = f"https://chzzk.naver.com/video/{video_id}"
+                seen_ids.add(video_id)
+
+                target_channel = None
+                target_message = None
+                message_id = tracker.get("message_id")
+                if message_id:
+                    try:
+                        target_channel = client.get_channel(tracker.get("channel_id")) or disc_channel
+                        if target_channel:
+                            target_message = await target_channel.fetch_message(message_id)
+                    except Exception as e:
+                        print("REPLAY BUTTON UPDATE ERROR:", e)
+
+                if target_message:
+                    await target_message.edit(
+                        view=build_action_view(channel_id, replay_url=replay_url, replay_disabled=False)
+                    )
+                print(f"**{channel_id}** 다시보기 버튼 활성화: {video_id}")
+
+                tracker["activated"] = True
+                tracker["replay_url"] = replay_url
+                tracker["seen_video_ids"] = list(seen_ids)
+                replay_tracking[channel_id] = tracker
+                state["replay_tracking"] = replay_tracking
+                save_json(STATE_FILE, state)
+                break
+
+            if not tracker.get("activated") and seen_ids != set(tracker.get("seen_video_ids", [])):
+                tracker["seen_video_ids"] = list(seen_ids)
+                replay_tracking[channel_id] = tracker
+                state["replay_tracking"] = replay_tracking
+                save_json(STATE_FILE, state)
 
         # 루프 시작 전 이전 방송 중 목록 확정
         previous_live_ids = set(
@@ -268,6 +468,7 @@ async def check_loop():
             # =========================
             if not was_live:
                 detail = await fetch_live_detail(channel_id)
+                event_key = extract_live_event_key(item, detail)
                 tags = []
                 thumbnail = None
                 open_ts = None
@@ -281,6 +482,15 @@ async def check_loop():
                     open_date_str = detail.get("openDate")
                     if open_date_str:
                         open_ts = to_unix_kst(open_date_str)
+
+                if event_key and state.get("last_live_event_id", {}).get(channel_id) == event_key:
+                    state["last_live"][channel_id] = True
+                    state["last_title"][channel_id] = title
+                    state["last_category"][channel_id] = category
+                    state["last_tags"][channel_id] = tags
+                    state["last_live_event_id"][channel_id] = event_key
+                    save_json(STATE_FILE, state)
+                    continue
 
                 embed = discord.Embed(
                     title=title,
@@ -305,13 +515,18 @@ async def check_loop():
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                await disc_channel.send(embed=embed)
+                await disc_channel.send(embed=embed, view=build_action_view(channel_id, include_live=True))
                 print(f"**{channel_name}** 라이브 시작")
 
                 state["last_live"][channel_id] = True
                 state["last_title"][channel_id] = title
                 state["last_category"][channel_id] = category
                 state["last_tags"][channel_id] = tags
+                if event_key:
+                    state["last_live_event_id"][channel_id] = event_key
+                else:
+                    state["last_live_event_id"].pop(channel_id, None)
+                save_json(STATE_FILE, state)
                 continue
 
             # =========================
@@ -409,15 +624,123 @@ async def check_loop():
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                await disc_channel.send(embed=embed)
+                initial_replay_url = None
+                initial_replay_id = None
+                replay_videos = await fetch_replay_videos(channel_id)
+                if replay_videos:
+                    for replay_item in replay_videos:
+                        if replay_item.get("videoType") != "REPLAY":
+                            continue
+                        initial_replay_id = replay_item.get("videoId")
+                        if initial_replay_id:
+                            initial_replay_url = f"https://chzzk.naver.com/video/{initial_replay_id}"
+                            break
+
+                end_message = await disc_channel.send(
+                    embed=embed,
+                    view=build_action_view(channel_id, replay_url=None, replay_disabled=True)
+                )
                 print(f"**{channel_name}** 라이브 종료")
 
             state["last_live"][channel_id] = False
+            state["last_live_event_id"].pop(channel_id, None)
+            replay_wait_until = None
+            if detail and open_date_str and close_date_str:
+                try:
+                    open_ts = to_unix_kst(open_date_str)
+                    close_ts = to_unix_kst(close_date_str)
+                    uptime_seconds = close_ts - open_ts
+                    replay_wait_until = close_ts + 60
+                    if uptime_seconds > 17 * 3600:
+                        replay_wait_until = close_ts + 60
+                    elif uptime_seconds > 0:
+                        replay_wait_until = close_ts + 60
+                except Exception:
+                    replay_wait_until = None
+
+            state["replay_tracking"][channel_id] = {
+                "expires_at": int(datetime.now().timestamp()) + 20 * 60,
+                "seen_video_ids": [initial_replay_id] if initial_replay_id else [],
+                "message_id": end_message.id if 'end_message' in locals() else None,
+                "channel_id": config["notify_channel"],
+                "activated": False,
+                "replay_url": None,
+                "wait_until": replay_wait_until
+            }
 
         save_json(STATE_FILE, state)
         elapsed = (datetime.now() - loop_start).total_seconds()
         sleep_time = max(1, CHECK_INTERVAL - elapsed)
         await asyncio.sleep(sleep_time)
+
+
+async def community_loop():
+    await client.wait_until_ready()
+
+    while not client.is_closed():
+        if not config.get("notify_channel"):
+            await asyncio.sleep(CM_CHECK_INTERVAL)
+            continue
+
+        community_posts = await fetch_community_posts()
+        if community_posts is None:
+            await asyncio.sleep(CM_CHECK_INTERVAL)
+            continue
+
+        disc_channel = client.get_channel(config["notify_channel"])
+        if not disc_channel:
+            await asyncio.sleep(CM_CHECK_INTERVAL)
+            continue
+
+        new_comments = []
+        for item in community_posts:
+            comment = item.get("comment", {})
+            comment_id = comment.get("commentId")
+            if not comment_id or comment_id in state["community_seen_comments"]:
+                continue
+            new_comments.append(item)
+
+        if new_comments:
+            for item in reversed(new_comments):
+                comment = item.get("comment", {})
+                user = item.get("user", {})
+                comment_id = comment.get("commentId")
+                content = comment.get("content", "")
+                created_date = comment.get("createdDate")
+                nickname = user.get("userNickname", "알 수 없음")
+                profile_image = user.get("profileImageUrl")
+                object_id = comment.get("objectId")
+
+                embed = discord.Embed(
+                    title=f"커뮤니티 알림 - {nickname}",
+                    description=content or "(내용 없음)",
+                    color=3447003
+                )
+                if profile_image:
+                    embed.set_thumbnail(url=profile_image)
+                if created_date:
+                    try:
+                        timestamp = to_unix_kst(created_date)
+                        embed.add_field(name="작성 시간", value=f"<t:{timestamp}:F>", inline=True)
+                    except Exception:
+                        embed.add_field(name="작성 시간", value=created_date, inline=True)
+                if object_id:
+                    embed.add_field(
+                        name="게시물 링크",
+                        value=f"https://chzzk.naver.com/{object_id}",
+                        inline=False
+                    )
+                embed.set_footer(text="Cheeeezzk 커뮤니티")
+                embed.timestamp = discord.utils.utcnow()
+
+                await disc_channel.send(embed=embed)
+                print(f"커뮤니티 새 글 알림: {comment_id} ({nickname})")
+
+                state["community_seen_comments"].append(comment_id)
+
+            save_json(STATE_FILE, state)
+
+        await asyncio.sleep(CM_CHECK_INTERVAL)
 
 # -------------------------
 # 명령어
@@ -521,6 +844,7 @@ async def on_ready():
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
     asyncio.create_task(check_loop())
+    asyncio.create_task(community_loop())
 
 @client.event
 async def on_guild_join(guild):
