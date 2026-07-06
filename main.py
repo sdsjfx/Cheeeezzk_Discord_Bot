@@ -1,4 +1,4 @@
-version = "dev\_version \_ V1.2.3"
+version = "dev\_version \_ V1.2.4"
 
 
 import discord
@@ -399,12 +399,12 @@ async def check_loop():
                 if item.get("videoType") != "REPLAY":
                     continue
 
-                video_id = item.get("videoId")
-                if not video_id or video_id in seen_ids:
+                video_No = item.get("videoNo")
+                if not video_No or video_No in seen_ids:
                     continue
 
-                replay_url = f"https://chzzk.naver.com/video/{video_id}"
-                seen_ids.add(video_id)
+                replay_url = f"https://chzzk.naver.com/video/{video_No}"
+                seen_ids.add(video_No)
 
                 target_channel = None
                 target_message = None
@@ -421,7 +421,7 @@ async def check_loop():
                     await target_message.edit(
                         view=build_action_view(channel_id, replay_url=replay_url, replay_disabled=False)
                     )
-                print(f"**{channel_id}** 다시보기 버튼 활성화: {video_id}")
+                print(f"**{channel_id}** 다시보기 버튼 활성화: {video_No}")
 
                 tracker["activated"] = True
                 tracker["replay_url"] = replay_url
