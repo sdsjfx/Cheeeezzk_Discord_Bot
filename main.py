@@ -1,4 +1,4 @@
-version = "dev\_version \_ V1.2.4"
+version = "dev\_version \_ V1.2.5"
 
 
 import discord
@@ -82,7 +82,7 @@ def extract_live_event_key(item, detail=None):
     return None
 
 
-def build_action_view(channel_id, include_live=False, replay_url=None, replay_disabled=False):
+def build_action_view(channel_id, include_live=False, include_replay=True, replay_url=None, replay_disabled=False):
     view = discord.ui.View(timeout=None)
     if include_live:
         view.add_item(
@@ -92,14 +92,15 @@ def build_action_view(channel_id, include_live=False, replay_url=None, replay_di
                 style=discord.ButtonStyle.link
             )
         )
-    view.add_item(
-        discord.ui.Button(
-            label="다시보기",
-            url=replay_url or f"https://chzzk.naver.com/{channel_id}",
-            style=discord.ButtonStyle.link,
-            disabled=replay_disabled
+    if include_replay:
+        view.add_item(
+            discord.ui.Button(
+                label="다시보기",
+                url=replay_url or f"https://chzzk.naver.com/{channel_id}",
+                style=discord.ButtonStyle.link,
+                disabled=replay_disabled
+            )
         )
-    )
     view.add_item(
         discord.ui.Button(
             label="채널로 가기",
@@ -515,7 +516,7 @@ async def check_loop():
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                await disc_channel.send(embed=embed, view=build_action_view(channel_id, include_live=True))
+                await disc_channel.send(embed=embed, view=build_action_view(channel_id, include_live=True, include_replay=False))
                 print(f"**{channel_name}** 라이브 시작")
 
                 state["last_live"][channel_id] = True
@@ -709,28 +710,34 @@ async def community_loop():
                 created_date = comment.get("createdDate")
                 nickname = user.get("userNickname", "알 수 없음")
                 profile_image = user.get("profileImageUrl")
+                author_url = user.get("profileUrl") or item.get("channel", {}).get("channelUrl")
                 object_id = comment.get("objectId")
+                channel_id = item.get("channel", {}).get("channelId")
+                image_url = comment.get("imageUrl") or comment.get("image") or item.get("imageUrl") or item.get("image")
 
                 embed = discord.Embed(
                     title=f"커뮤니티 알림 - {nickname}",
                     description=content or "(내용 없음)",
                     color=3447003
                 )
-                if profile_image:
-                    embed.set_thumbnail(url=profile_image)
+                if author_url:
+                    embed.set_author(name=nickname, icon_url=profile_image, url=author_url)
+                else:
+                    embed.set_author(name=nickname, icon_url=profile_image)
                 if created_date:
                     try:
                         timestamp = to_unix_kst(created_date)
-                        embed.add_field(name="작성 시간", value=f"<t:{timestamp}:F>", inline=True)
+                        embed.add_field(name="작성시간", value=f"<t:{timestamp}:t>", inline=True)
                     except Exception:
-                        embed.add_field(name="작성 시간", value=created_date, inline=True)
+                        embed.add_field(name="작성시간", value=created_date, inline=True)
+                if image_url:
+                    embed.set_image(url=image_url)
                 if object_id:
-                    embed.add_field(
-                        name="게시물 링크",
-                        value=f"https://chzzk.naver.com/{object_id}",
-                        inline=False
-                    )
-                embed.set_footer(text="Cheeeezzk 커뮤니티")
+                    if channel_id:
+                        embed.url = f"https://chzzk.naver.com/{channel_id}/community/detail/{object_id}"
+                    else:
+                        embed.url = f"https://chzzk.naver.com/{object_id}"
+                embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
                 await disc_channel.send(embed=embed)
