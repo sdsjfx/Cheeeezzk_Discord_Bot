@@ -1,4 +1,4 @@
-version = "dev\_version \_ V1.2.5"
+version = "dev\_version \_ V1.2.6"
 
 
 import discord
@@ -56,6 +56,94 @@ def to_unix_kst(dt_str: str):
         dt = datetime.strptime(dt_str, "%Y%m%d%H%M%S")
     dt = dt.replace(tzinfo=kst)
     return int(dt.timestamp())
+
+
+def parse_timestamp_value(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    if raw.isdigit() and len(raw) >= 10:
+        return int(raw)
+
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
+        try:
+            dt = datetime.strptime(raw, fmt)
+            return int(dt.replace(tzinfo=kst).timestamp())
+        except ValueError:
+            continue
+
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=kst)
+        else:
+            dt = dt.astimezone(kst)
+        return int(dt.timestamp())
+    except ValueError:
+        return None
+
+
+def select_replay_video(replay_videos, open_ts=None, close_ts=None):
+    if not replay_videos:
+        return None
+
+    candidates = []
+    for item in replay_videos:
+        if item.get("videoType") != "REPLAY":
+            continue
+
+        video_id = item.get("videoId") or item.get("videoNo")
+        if not video_id:
+            continue
+
+        created_ts = None
+        for key in (
+            "createdDate",
+            "createdAt",
+            "registerDate",
+            "regDate",
+            "publishDate",
+            "openDate",
+            "videoCreatedDate",
+            "createdTime",
+            "date",
+        ):
+            created_ts = parse_timestamp_value(item.get(key))
+            if created_ts is not None:
+                break
+
+        if open_ts is not None and created_ts is not None and created_ts < open_ts - 300:
+            continue
+        if close_ts is not None and created_ts is not None and created_ts > close_ts + 24 * 3600:
+            continue
+
+        candidates.append((created_ts, item))
+
+    if candidates:
+        if open_ts is not None and close_ts is not None:
+            candidates.sort(key=lambda entry: (
+                abs((entry[0] if entry[0] is not None else close_ts) - close_ts),
+                -(entry[0] if entry[0] is not None else 0)
+            ))
+        else:
+            candidates.sort(key=lambda entry: (-(entry[0] if entry[0] is not None else 0), entry[1].get("videoNo", "")))
+        return candidates[0][1]
+
+    for item in replay_videos:
+        if item.get("videoType") == "REPLAY":
+            return item
+
+    return None
 
 
 def extract_live_event_key(item, detail=None):
@@ -378,14 +466,14 @@ async def check_loop():
 
         now_ts = int(datetime.now().timestamp())
         replay_tracking = state.get("replay_tracking", {})
-        for channel_id, tracker in list(replay_tracking.items()):
+        for track_key, tracker in list(replay_tracking.items()):
             expires_at = tracker.get("expires_at", 0)
             if expires_at <= now_ts:
-                replay_tracking.pop(channel_id, None)
+                replay_tracking.pop(track_key, None)
                 continue
 
             if tracker.get("activated"):
-                replay_tracking.pop(channel_id, None)
+                replay_tracking.pop(track_key, None)
                 continue
 
             if tracker.get("wait_until") and now_ts < tracker["wait_until"]:
@@ -396,16 +484,16 @@ async def check_loop():
                 continue
 
             seen_ids = set(tracker.get("seen_video_ids", []))
-            for item in replay_videos:
-                if item.get("videoType") != "REPLAY":
-                    continue
-
-                video_No = item.get("videoNo")
-                if not video_No or video_No in seen_ids:
-                    continue
-
-                replay_url = f"https://chzzk.naver.com/video/{video_No}"
-                seen_ids.add(video_No)
+            matched_replay = select_replay_video(
+                replay_videos,
+                open_ts=tracker.get("open_ts"),
+                close_ts=tracker.get("close_ts")
+            )
+            if matched_replay:
+                video_id = matched_replay.get("videoNo")
+                if video_id and video_id not in seen_ids:
+                    replay_url = f"https://chzzk.naver.com/video/{video_id}"
+                    seen_ids.add(video_id)
 
                 target_channel = None
                 target_message = None
@@ -422,19 +510,19 @@ async def check_loop():
                     await target_message.edit(
                         view=build_action_view(channel_id, replay_url=replay_url, replay_disabled=False)
                     )
-                print(f"**{channel_id}** 다시보기 버튼 활성화: {video_No}")
+                print(f"**{channel_id}** 다시보기 버튼 활성화: {video_id}")
 
                 tracker["activated"] = True
                 tracker["replay_url"] = replay_url
                 tracker["seen_video_ids"] = list(seen_ids)
-                replay_tracking[channel_id] = tracker
+                replay_tracking[track_key] = tracker
                 state["replay_tracking"] = replay_tracking
                 save_json(STATE_FILE, state)
                 break
 
             if not tracker.get("activated") and seen_ids != set(tracker.get("seen_video_ids", [])):
                 tracker["seen_video_ids"] = list(seen_ids)
-                replay_tracking[channel_id] = tracker
+                replay_tracking[track_key] = tracker
                 state["replay_tracking"] = replay_tracking
                 save_json(STATE_FILE, state)
 
@@ -629,13 +717,11 @@ async def check_loop():
                 initial_replay_id = None
                 replay_videos = await fetch_replay_videos(channel_id)
                 if replay_videos:
-                    for replay_item in replay_videos:
-                        if replay_item.get("videoType") != "REPLAY":
-                            continue
-                        initial_replay_id = replay_item.get("videoId")
+                    replay_item = select_replay_video(replay_videos, open_ts=open_ts, close_ts=close_ts)
+                    if replay_item:
+                        initial_replay_id = replay_item.get("videoId") or replay_item.get("videoNo")
                         if initial_replay_id:
                             initial_replay_url = f"https://chzzk.naver.com/video/{initial_replay_id}"
-                            break
 
                 end_message = await disc_channel.send(
                     embed=embed,
@@ -659,14 +745,18 @@ async def check_loop():
                 except Exception:
                     replay_wait_until = None
 
-            state["replay_tracking"][channel_id] = {
+            track_key = f"{channel_id}:{int(datetime.now().timestamp())}:{open_ts if 'open_ts' in locals() else 0}"
+            state["replay_tracking"][track_key] = {
+                "channel_id": channel_id,
                 "expires_at": int(datetime.now().timestamp()) + 20 * 60,
                 "seen_video_ids": [initial_replay_id] if initial_replay_id else [],
                 "message_id": end_message.id if 'end_message' in locals() else None,
-                "channel_id": config["notify_channel"],
+                "notify_channel_id": config["notify_channel"],
                 "activated": False,
                 "replay_url": None,
-                "wait_until": replay_wait_until
+                "wait_until": replay_wait_until,
+                "open_ts": open_ts if 'open_ts' in locals() else None,
+                "close_ts": close_ts if 'close_ts' in locals() else None
             }
 
         save_json(STATE_FILE, state)
@@ -712,7 +802,7 @@ async def community_loop():
                 profile_image = user.get("profileImageUrl")
                 author_url = user.get("profileUrl") or item.get("channel", {}).get("channelUrl")
                 object_id = comment.get("objectId")
-                channel_id = item.get("channel", {}).get("channelId")
+                # channel_id = item.get("channel", {}).get("channelId")
                 image_url = comment.get("imageUrl") or comment.get("image") or item.get("imageUrl") or item.get("image")
 
                 embed = discord.Embed(
@@ -733,10 +823,7 @@ async def community_loop():
                 if image_url:
                     embed.set_image(url=image_url)
                 if object_id:
-                    if channel_id:
-                        embed.url = f"https://chzzk.naver.com/{channel_id}/community/detail/{object_id}"
-                    else:
-                        embed.url = f"https://chzzk.naver.com/{object_id}"
+                    embed.url = f"https://chzzk.naver.com/{object_id}/community/detail/{comment_id}"
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
