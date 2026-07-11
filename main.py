@@ -1,4 +1,4 @@
-version = "dev\\_version\\_V1.2.7"
+version = "dev_version_V1.2.9"
 
 
 import discord
@@ -268,6 +268,9 @@ tree = app_commands.CommandTree(client)
 
 session = None
 background_loops_started = False
+initial_sync_done = False
+background_tasks = []
+shutting_down = False
 
 # -------------------------
 # 계정 정보 호출
@@ -551,6 +554,45 @@ async def check_loop():
                 replay_tracking[track_key] = tracker
                 state["replay_tracking"] = replay_tracking
                 save_json(STATE_FILE, state)
+
+        # 초깃값 동기화: 봇 재시작 직후에는 상태를 현재 API 값으로 맞추기만 하고 알림은 보내지 않음
+        global initial_sync_done
+        if not initial_sync_done:
+            try:
+                # live_list은 이미 호출되어 있음
+                for item in live_list:
+                    cid = item.get("channelId")
+                    live_info = item.get("liveInfo", {})
+                    title = live_info.get("liveTitle")
+                    category = live_info.get("liveCategoryValue") or "없음"
+                    # 상세에서 태그를 가져오려 시도하지만 실패해도 무시
+                    tags = []
+                    try:
+                        detail = await fetch_live_detail(cid)
+                        if detail:
+                            raw_tags = detail.get("tags")
+                            tags = raw_tags if isinstance(raw_tags, list) else []
+                            event_key = extract_live_event_key(item, detail)
+                        else:
+                            event_key = extract_live_event_key(item, None)
+                    except Exception:
+                        event_key = extract_live_event_key(item, None)
+
+                    state.setdefault("last_live", {})[cid] = True
+                    state.setdefault("last_title", {})[cid] = title
+                    state.setdefault("last_category", {})[cid] = category
+                    state.setdefault("last_tags", {})[cid] = tags
+                    if event_key:
+                        state.setdefault("last_live_event_id", {})[cid] = event_key
+
+                save_json(STATE_FILE, state)
+            except Exception as e:
+                print("INITIAL SYNC ERROR:", e)
+
+            initial_sync_done = True
+            # 잠깐 쉬어서 재시작 직후 알림이 발생하지 않게 함
+            await asyncio.sleep(CHECK_INTERVAL)
+            continue
 
         # 루프 시작 전 이전 방송 중 목록 확정
         previous_live_ids = set(
@@ -886,47 +928,57 @@ async def login(interaction: discord.Interaction, nid_aut: str, nid_ses: str):
 @tree.command(name="정보", description="로그인 정보와 현재 디스코드 봇의 버전을 확인합니다.")
 async def info(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    try:
+        # 쿠키가 아예 없는 경우
+        if not config.get("NID_AUT") or not config.get("NID_SES"):
+            embed = discord.Embed(
+                title="Cheeeezzk 정보",
+                color=16718891
+            )
+            embed.add_field(name="로그인 상태", value="로그인되지 않음", inline=False)
+            embed.add_field(name="버전", value=version, inline=False)
+            embed.set_footer(text="Cheeeezzk")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
 
-    # 쿠키가 아예 없는 경우
-    if not config.get("NID_AUT") or not config.get("NID_SES"):
+        content = await login_account_info()
+
+        if not content or not content.get("loggedIn"):
+            embed = discord.Embed(
+                title="Cheeeezzk 정보",
+                color=16718891
+            )
+            embed.add_field(name="로그인 상태", value="로그인되지 않음\n(쿠키가 만료되었을 수 있습니다)", inline=False)
+            embed.add_field(name="버전", value=version, inline=False)
+            embed.set_footer(text="Cheeeezzk")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        nickname = content.get("nickname", "알 수 없음")
+        profile_image = content.get("profileImageUrl")
+
         embed = discord.Embed(
             title="Cheeeezzk 정보",
-            color=16718891
+            color=65441
         )
-        embed.add_field(name="로그인 상태", value="로그인되지 않음", inline=False)
+        embed.add_field(name="로그인 상태", value="로그인됨", inline=False)
+        embed.add_field(name="닉네임", value=nickname, inline=False)
         embed.add_field(name="버전", value=version, inline=False)
+        if profile_image:
+            embed.set_thumbnail(url=profile_image)
         embed.set_footer(text="Cheeeezzk")
+
         await interaction.followup.send(embed=embed, ephemeral=True)
-        return
-
-    content = await login_account_info()
-
-    if not content or not content.get("loggedIn"):
-        embed = discord.Embed(
-            title="Cheeeezzk 정보",
-            color=16718891
-        )
-        embed.add_field(name="로그인 상태", value="로그인되지 않음\n(쿠키가 만료되었을 수 있습니다)", inline=False)
-        embed.add_field(name="버전", value=version, inline=False)
-        embed.set_footer(text="Cheeeezzk")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        return
-
-    nickname = content.get("nickname", "알 수 없음")
-    profile_image = content.get("profileImageUrl")
-
-    embed = discord.Embed(
-        title="Cheeeezzk 정보",
-        color=65441
-    )
-    embed.add_field(name="로그인 상태", value="로그인됨", inline=False)
-    embed.add_field(name="닉네임", value=nickname, inline=False)
-    embed.add_field(name="버전", value=version, inline=False)
-    if profile_image:
-        embed.set_thumbnail(url=profile_image)
-    embed.set_footer(text="Cheeeezzk")
-
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        print("INFO COMMAND ERROR:", e)
+        try:
+            await interaction.followup.send("오류가 발생했습니다. 다시 시도하거나 로그를 확인하세요.", ephemeral=True)
+        except Exception:
+            try:
+                # fallback if followup fails
+                await interaction.response.send_message("오류가 발생했습니다.", ephemeral=True)
+            except Exception:
+                pass
 
 @tree.command(name="로그아웃", description="현재 로그인 되어있는 계정을 로그아웃합니다.")
 async def logout(interaction: discord.Interaction):
@@ -968,8 +1020,10 @@ async def on_ready():
     await tree.sync()
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
-    asyncio.create_task(check_loop())
-    asyncio.create_task(community_loop())
+    # start background tasks and keep references for graceful shutdown
+    t1 = asyncio.create_task(check_loop())
+    t2 = asyncio.create_task(community_loop())
+    background_tasks.extend([t1, t2])
 
 @client.event
 async def on_guild_join(guild):
@@ -981,4 +1035,65 @@ async def on_guild_leave(guild):
     print(f"{guild} 서버에서 추방됨")
     return
 
-client.run(TOKEN)
+
+async def graceful_shutdown():
+    global shutting_down, background_tasks, session
+    if shutting_down:
+        return
+    shutting_down = True
+    print("Graceful shutdown initiated")
+
+    # cancel background tasks
+    for t in list(background_tasks):
+        try:
+            t.cancel()
+        except Exception:
+            pass
+
+    # wait for tasks to finish
+    for t in list(background_tasks):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print("Error while waiting for task:", e)
+
+    # close aiohttp session
+    try:
+        if session and not session.closed:
+            await session.close()
+    except Exception as e:
+        print("Error closing session:", e)
+
+    # persist state
+    try:
+        save_json(STATE_FILE, state)
+    except Exception as e:
+        print("Error saving state during shutdown:", e)
+
+    # close discord client
+    try:
+        await client.close()
+    except Exception as e:
+        print("Error closing discord client:", e)
+
+
+if __name__ == '__main__':
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(client.start(TOKEN))
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt received, running graceful shutdown...")
+        loop.run_until_complete(graceful_shutdown())
+    finally:
+        try:
+            loop.run_until_complete(graceful_shutdown())
+        except Exception:
+            pass
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
