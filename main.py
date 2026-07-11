@@ -1,4 +1,4 @@
-version = "dev\_version \_ V1.2.6"
+version = "dev\\_version\\_V1.2.7"
 
 
 import discord
@@ -96,14 +96,43 @@ def parse_timestamp_value(value):
 def select_replay_video(replay_videos, open_ts=None, close_ts=None):
     if not replay_videos:
         return None
+    # Prefer replay videos that were uploaded after the stream close time.
+    # This avoids linking earlier split chunks (e.g. 17-hour parts) that
+    # were generated before the stream actually ended.
+    if close_ts is None:
+        # If we don't know close time, fall back to selecting the latest REPLAY.
+        latest = None
+        latest_ts = -1
+        for item in replay_videos:
+            if item.get("videoType") != "REPLAY":
+                continue
+            created_ts = None
+            for key in (
+                "createdDate",
+                "createdAt",
+                "registerDate",
+                "regDate",
+                "publishDate",
+                "openDate",
+                "videoCreatedDate",
+                "createdTime",
+                "date",
+            ):
+                created_ts = parse_timestamp_value(item.get(key))
+                if created_ts is not None:
+                    break
+            if created_ts is None:
+                # treat unknown timestamps as very old
+                created_ts = 0
+            if created_ts > latest_ts:
+                latest_ts = created_ts
+                latest = item
+        return latest
 
-    candidates = []
+    # Only consider replays uploaded after stream close (allow small clock skew).
+    post_close = []
     for item in replay_videos:
         if item.get("videoType") != "REPLAY":
-            continue
-
-        video_id = item.get("videoId") or item.get("videoNo")
-        if not video_id:
             continue
 
         created_ts = None
@@ -122,28 +151,19 @@ def select_replay_video(replay_videos, open_ts=None, close_ts=None):
             if created_ts is not None:
                 break
 
-        if open_ts is not None and created_ts is not None and created_ts < open_ts - 300:
-            continue
-        if close_ts is not None and created_ts is not None and created_ts > close_ts + 24 * 3600:
+        if created_ts is None:
             continue
 
-        candidates.append((created_ts, item))
+        # require creation time at or after close time (allow 60s skew)
+        if created_ts >= (close_ts - 60):
+            post_close.append((created_ts, item))
 
-    if candidates:
-        if open_ts is not None and close_ts is not None:
-            candidates.sort(key=lambda entry: (
-                abs((entry[0] if entry[0] is not None else close_ts) - close_ts),
-                -(entry[0] if entry[0] is not None else 0)
-            ))
-        else:
-            candidates.sort(key=lambda entry: (-(entry[0] if entry[0] is not None else 0), entry[1].get("videoNo", "")))
-        return candidates[0][1]
+    if not post_close:
+        return None
 
-    for item in replay_videos:
-        if item.get("videoType") == "REPLAY":
-            return item
-
-    return None
+    # choose the earliest post-close replay (closest to close_ts but >= close)
+    post_close.sort(key=lambda entry: (entry[0] - close_ts, -entry[0]))
+    return post_close[0][1]
 
 
 def extract_live_event_key(item, detail=None):
@@ -247,6 +267,7 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 session = None
+background_loops_started = False
 
 # -------------------------
 # 계정 정보 호출
@@ -479,6 +500,11 @@ async def check_loop():
             if tracker.get("wait_until") and now_ts < tracker["wait_until"]:
                 continue
 
+            channel_id = tracker.get("channel_id")
+            if not channel_id:
+                replay_tracking.pop(track_key, None)
+                continue
+
             replay_videos = await fetch_replay_videos(channel_id)
             if not replay_videos:
                 continue
@@ -656,7 +682,7 @@ async def check_loop():
                 for name, old, new in changes:
                     embed.add_field(
                         name=name,
-                        value=f"```\n이전:\n{old or '없음'}\n현재:\n{new or '없음'}\n```",
+                        value=f"이전: {old or '없음'}\n현재: {new or '없음'}",
                         inline=False
                     )
 
@@ -933,7 +959,12 @@ async def help(interaction: discord.Interaction):
 
 @client.event
 async def on_ready():
-    global session
+    global session, background_loops_started
+
+    if background_loops_started:
+        return
+
+    background_loops_started = True
     await tree.sync()
     session = aiohttp.ClientSession()
     print(f"Logged in as {client.user}")
