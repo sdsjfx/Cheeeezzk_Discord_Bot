@@ -1,4 +1,4 @@
-version = "dev_version_V1.2.10"
+version = "dev_version_V1.2.11"
 
 
 import discord
@@ -124,7 +124,7 @@ def select_replay_video(replay_videos, open_ts=None, close_ts=None, after_ts=Non
         if item.get("videoType") != "REPLAY":
             continue
 
-        video_id = item.get("videoId") or item.get("videoNo")
+        video_id = item.get("videoNo")
         if not video_id:
             continue
 
@@ -143,23 +143,19 @@ def select_replay_video(replay_videos, open_ts=None, close_ts=None, after_ts=Non
 
         candidates.append((created_ts, item))
 
-    if candidates:
-        if prefer_latest:
-            candidates.sort(key=lambda entry: (entry[0] if entry[0] is not None else 0), reverse=True)
-        elif open_ts is not None and close_ts is not None:
-            candidates.sort(key=lambda entry: (
-                abs((entry[0] if entry[0] is not None else close_ts) - close_ts),
-                -(entry[0] if entry[0] is not None else 0)
-            ))
-        else:
-            candidates.sort(key=lambda entry: (entry[0] if entry[0] is not None else 0))
-        return candidates[0][1]
+    if not candidates:
+        return None
 
-    for item in replay_videos:
-        if item.get("videoType") == "REPLAY":
-            return item
-
-    return None
+    if prefer_latest:
+        candidates.sort(key=lambda entry: (entry[0] if entry[0] is not None else 0), reverse=True)
+    elif open_ts is not None and close_ts is not None:
+        candidates.sort(key=lambda entry: (
+            abs((entry[0] if entry[0] is not None else close_ts) - close_ts),
+            -(entry[0] if entry[0] is not None else 0)
+        ))
+    else:
+        candidates.sort(key=lambda entry: (entry[0] if entry[0] is not None else 0))
+    return candidates[0][1]
 
 
 def extract_live_event_key(item, detail=None):
@@ -537,7 +533,7 @@ async def check_loop():
                 )
 
             if matched_replay:
-                video_id = matched_replay.get("videoNo") or matched_replay.get("videoId")
+                video_id = matched_replay.get("videoNo")
                 if video_id and video_id not in seen_ids:
                     replay_url = f"https://chzzk.naver.com/video/{video_id}"
                     seen_ids.add(video_id)
@@ -634,7 +630,7 @@ async def check_loop():
                                 prefer_latest=False
                             )
                             if mid_replay:
-                                mid_replay_id = mid_replay.get("videoNo") or mid_replay.get("videoId")
+                                mid_replay_id = mid_replay.get("videoNo")
                                 if mid_replay_id:
                                     mid_replay_url = f"https://chzzk.naver.com/video/{mid_replay_id}"
                                     channel_replay_state["mid_replay_url"] = mid_replay_url
@@ -724,7 +720,7 @@ async def check_loop():
                                 prefer_latest=False
                             )
                             if mid_replay:
-                                mid_replay_id = mid_replay.get("videoNo") or mid_replay.get("videoId")
+                                mid_replay_id = mid_replay.get("videoNo")
                                 if mid_replay_id:
                                     mid_replay_url = f"https://chzzk.naver.com/video/{mid_replay_id}"
                                     channel_replay_state["mid_replay_url"] = mid_replay_url
@@ -830,7 +826,7 @@ async def check_loop():
                         prefer_latest=True
                     )
                     if end_replay:
-                        initial_replay_id = end_replay.get("videoId") or end_replay.get("videoNo")
+                        initial_replay_id = end_replay.get("videoNo")
                         if initial_replay_id and initial_replay_id not in initial_replay_ids:
                             initial_replay_ids.append(initial_replay_id)
                             initial_replay_urls.append(f"https://chzzk.naver.com/video/{initial_replay_id}")
@@ -915,7 +911,15 @@ async def community_loop():
                 author_url = user.get("profileUrl") or item.get("channel", {}).get("channelUrl")
                 object_id = comment.get("objectId")
                 # channel_id = item.get("channel", {}).get("channelId")
-                image_url = comment.get("imageUrl") or comment.get("image") or item.get("imageUrl") or item.get("image")
+                # 댓글의 첨부 이미지가 있는지 우선 검사 (attaches에 attachValue로 들어옴)
+                image_url = None
+                attaches = comment.get("attaches")
+                if isinstance(attaches, list) and attaches:
+                    first_attach = attaches[0]
+                    image_url = first_attach.get("attachValue") or first_attach.get("value") or first_attach.get("url")
+
+                # 기존 필드들로 폴백
+                image_url = image_url or comment.get("imageUrl") or comment.get("image") or item.get("imageUrl") or item.get("image")
 
                 embed = discord.Embed(
                     title=f"커뮤니티 알림 - {nickname}",
