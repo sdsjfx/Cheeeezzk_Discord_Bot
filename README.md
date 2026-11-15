@@ -1,8 +1,8 @@
-# Cheeeezzk Discord Bot dev _ V1.2.11  
+# Cheeeezzk Discord Bot dev _ V1.2.12  
 
 **지금 당신이 보고 계시는 페이지는 dev버전**이며, 새로생기는 기능을 먼저 체험해보실 수 있습니다.  
 **하지만 예상치못한 치명적인 버그가 존재할 수 있으며, 수시로 코드가 바뀔 수 있습니다.**  
-stable버전은 [여기](https://github.com/sdsjfx/Cheeeezzk_Discord_Bot/tree/main)에서 확인하실 수 있습니다.
+안정버전은 [여기](https://github.com/sdsjfx/Cheeeezzk_Discord_Bot/tree/main)에서 확인하실 수 있습니다.
 
 ## dev _ 업데이트 로그
 >
@@ -17,3 +17,4 @@ stable버전은 [여기](https://github.com/sdsjfx/Cheeeezzk_Discord_Bot/tree/ma
 > ~~V1.2.9 : V1.2.8에서 고쳐지지 않은 오류 다시 수정~~  
 > V1.2.10 : V1.2.6으로 롤백 후 다시보기 보기 버튼 17시간 이상 대응 및 과거 영상 링크 오류 수정  
 > V1.2.11 : 다시보기 버튼 3개씩 뜨는 오류 수정, 커뮤니티 사진 안뜨는 오류 수정  
+> V1.2.12 : 새로생긴 버그 수정(가끔씩 알림이 두번 오는 오류)  

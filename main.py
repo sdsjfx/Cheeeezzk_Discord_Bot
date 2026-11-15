@@ -1,4 +1,4 @@
-version = "dev_version_V1.2.11"
+version = "dev_version_V1.2.12"
 
 
 import discord
@@ -277,6 +277,10 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 session = None
+
+# 중복 실행 방지용 백그라운드 작업 참조
+check_task = None
+community_task = None
 
 # -------------------------
 # 계정 정보 호출
@@ -1049,12 +1053,25 @@ async def help(interaction: discord.Interaction):
 
 @client.event
 async def on_ready():
-    global session
+    global session, check_task, community_task
+
     await tree.sync()
-    session = aiohttp.ClientSession()
+
+    # 이미 사용 중인 세션이 있으면 재사용
+    if session is None or session.closed:
+        session = aiohttp.ClientSession()
+
     print(f"Logged in as {client.user}")
-    asyncio.create_task(check_loop())
-    asyncio.create_task(community_loop())
+
+    # Discord 재연결 등으로 on_ready()가 다시 호출되어도
+    # 기존 작업이 살아 있다면 새 작업을 만들지 않음
+    if check_task is None or check_task.done():
+        check_task = asyncio.create_task(check_loop())
+        print("라이브 알림 체크 작업 시작")
+
+    if community_task is None or community_task.done():
+        community_task = asyncio.create_task(community_loop())
+        print("커뮤니티 알림 체크 작업 시작")
 
 @client.event
 async def on_guild_join(guild):
