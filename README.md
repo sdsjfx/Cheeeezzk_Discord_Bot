@@ -1,14 +1,14 @@
-=======
-## Cheeeezzk Discord Bot V1.3
+# Cheeeezzk Discord Bot V1.3  
 
 쿠키를 사용해 네이버계정 로그인을 하면 현재 팔로우중인 스트리머의 방송 시작, 방제 및 카테고리 변경, 방송 종료 알림을 보내주는 디스코드 봇입니다.
 
 명령어:  
-/help  
-/login <NID_AUT> <NID_SES>  
-/logout  
-/setchannel  
-<자세한 설명은 /help 사용해주세요>
+/도움말  
+/로그인 <NID_AUT> <NID_SES>  
+/로그아웃  
+/채널설정
+/정보  
+<자세한 설명은 /도움말 사용해주세요>
 
 **코드의 90%이상은 ChatGPT 및 Claude가 작성**했으며, 오류 발생시 Issue작성 부탁드립니다.
 

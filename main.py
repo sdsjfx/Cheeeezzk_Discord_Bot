@@ -1,4 +1,5 @@
-# main _ V1.3
+version = "Main_V1.3.0"
+
 
 import discord
 from discord import app_commands
