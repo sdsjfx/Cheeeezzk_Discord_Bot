@@ -1,4 +1,4 @@
-version = "dev_version_V1.2.12"
+version = "dev_version_V1.2.13"
 
 
 import discord
@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 import json
 import os
+import tempfile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,6 +35,8 @@ def load_json(path, default):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        if not isinstance(data, dict):
+            raise ValueError("JSON 최상위 값이 객체가 아닙니다")
         for key in default:
             if key not in data:
                 data[key] = default[key]
@@ -41,29 +44,43 @@ def load_json(path, default):
         return data
 
     except Exception as e:
-        print(f"{path} 로딩 실패 → 초기화:", e)
-        save_json(path, default)
+        print(f"{path} 로딩 실패 (기존 파일은 보존):", e)
+        # 손상된 원본을 덮어쓰지 않고 별도 백업한 뒤 기본값 사용
+        try:
+            backup_path = path + ".corrupt"
+            if not os.path.exists(backup_path):
+                with open(path, "rb") as source, open(backup_path, "wb") as backup:
+                    backup.write(source.read())
+        except OSError as backup_error:
+            print(f"{path} 백업 실패:", backup_error)
         return default
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
-
-def to_unix_kst(dt_str: str):
-    if "-" in dt_str:
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    else:
-        dt = datetime.strptime(dt_str, "%Y%m%d%H%M%S")
-    dt = dt.replace(tzinfo=kst)
-    return int(dt.timestamp())
-
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temp_path = tempfile.mkstemp(prefix=".json-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
 
 def parse_timestamp_value(value):
     if value is None:
         return None
 
     if isinstance(value, (int, float)):
-        return int(value)
+        number = float(value)
+        # 밀리초 Unix timestamp는 초 단위로 정규화
+        if abs(number) >= 100_000_000_000:
+            number /= 1000
+        return int(number)
 
     if not isinstance(value, str):
         return None
@@ -73,7 +90,10 @@ def parse_timestamp_value(value):
         return None
 
     if raw.isdigit() and len(raw) >= 10:
-        return int(raw)
+        number = int(raw)
+        if abs(number) >= 100_000_000_000:
+            number //= 1000
+        return number
 
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
         try:
@@ -91,6 +111,11 @@ def parse_timestamp_value(value):
         return int(dt.timestamp())
     except ValueError:
         return None
+
+
+def to_unix_kst(value):
+    """레거시 호출명을 유지하며 공통 날짜 파서를 사용합니다."""
+    return parse_timestamp_value(value)
 
 
 def get_replay_created_ts(item):
@@ -121,6 +146,8 @@ def select_replay_video(replay_videos, open_ts=None, close_ts=None, after_ts=Non
 
     candidates = []
     for item in replay_videos:
+        if not isinstance(item, dict):
+            continue
         if item.get("videoType") != "REPLAY":
             continue
 
@@ -273,7 +300,37 @@ if "community_seen_comments" not in state or not isinstance(state["community_see
 # -------------------------
 
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+
+
+class CheeeezzkClient(discord.Client):
+    async def setup_hook(self):
+        global session, check_task, community_task
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+        try:
+            await tree.sync()
+        except Exception as e:
+            print("명령어 동기화 실패:", repr(e))
+        if check_task is None or check_task.done():
+            check_task = asyncio.create_task(supervise_loop(check_loop, "라이브"))
+        if community_task is None or community_task.done():
+            community_task = asyncio.create_task(supervise_loop(community_loop, "커뮤니티"))
+
+    async def close(self):
+        global session
+        tasks = []
+        for task in (check_task, community_task):
+            if task and not task.done():
+                task.cancel()
+                tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if session is not None and not session.closed:
+            await session.close()
+        await super().close()
+
+
+client = CheeeezzkClient(intents=intents)
 tree = app_commands.CommandTree(client)
 
 session = None
@@ -311,7 +368,8 @@ async def login_account_info():
             if data.get("code") != 200:
                 return None
 
-            return data.get("content", {})
+            content = data.get("content", {})
+            return content if isinstance(content, dict) else None
     except Exception as e:
         print("LOGIN ACCOUNT INFO ERROR:", e)
         return None
@@ -345,7 +403,8 @@ async def fetch_live_detail(channel_id):
             if data.get("code") != 200:
                 return None
 
-            return data.get("content", {})
+            content = data.get("content", {})
+            return content if isinstance(content, dict) else None
     except Exception as e:
         print("LIVE DETAIL ERROR:", e)
         return None
@@ -390,7 +449,11 @@ async def fetch_live_followings():
             if data.get("code") != 200:
                 return None
 
-            return data["content"]["followingList"]
+            content = data.get("content")
+            if not isinstance(content, dict) or not isinstance(content.get("followingList"), list):
+                print("LIVE FETCH ERROR: 응답 content.followingList 형식이 예상과 다릅니다")
+                return None
+            return content["followingList"]
 
     except Exception as e:
         print("LIVE FETCH ERROR:", e)
@@ -433,7 +496,12 @@ async def fetch_community_posts():
             if data.get("code") != 200:
                 return None
 
-            return data.get("content", {}).get("channelPosts", [])
+            content = data.get("content")
+            # API 문서로 응답 스키마를 확정할 수 없어 키는 기존 형식을 유지하고 방어적으로만 검사
+            if not isinstance(content, dict) or not isinstance(content.get("channelPosts"), list):
+                print("COMMUNITY FETCH ERROR: 응답 content.channelPosts 형식이 예상과 다릅니다")
+                return None
+            return content["channelPosts"]
 
     except Exception as e:
         print("COMMUNITY FETCH ERROR:", e)
@@ -468,7 +536,11 @@ async def fetch_replay_videos(channel_id):
             if data.get("code") != 200:
                 return []
 
-            return data.get("content", {}).get("data", [])
+            content = data.get("content")
+            if not isinstance(content, dict) or not isinstance(content.get("data"), list):
+                print("REPLAY FETCH ERROR: 응답 content.data 형식이 예상과 다릅니다")
+                return []
+            return content["data"]
     except Exception as e:
         print("REPLAY FETCH ERROR:", e)
         return []
@@ -538,6 +610,9 @@ async def check_loop():
 
             if matched_replay:
                 video_id = matched_replay.get("videoNo")
+                # 기존에 본 ID뿐이면 Discord 메시지를 다시 수정하지 않음
+                if not video_id or video_id in seen_ids:
+                    continue
                 if video_id and video_id not in seen_ids:
                     replay_url = f"https://chzzk.naver.com/video/{video_id}"
                     seen_ids.add(video_id)
@@ -583,16 +658,24 @@ async def check_loop():
         current_live_ids = set()
 
         for item in live_list:
-            channel_id = item["channelId"]
-            notification = item["channel"]["personalData"]["following"]["notification"]
+            if not isinstance(item, dict):
+                print("LIVE ITEM INVALID: 항목이 객체가 아니어서 건너뜀")
+                continue
+            channel_id = item.get("channelId")
+            channel = item.get("channel")
+            following = (channel.get("personalData") or {}).get("following") if isinstance(channel, dict) and isinstance(channel.get("personalData"), dict) else None
+            if not channel_id or not isinstance(channel, dict) or not isinstance(following, dict) or "notification" not in following:
+                print("LIVE ITEM INVALID: 필수 필드 누락, 항목 건너뜀")
+                continue
+            notification = following.get("notification")
 
             # 알림 꺼진 스트리머는 current에만 추가하고 건너뜀
             if not notification:
                 current_live_ids.add(channel_id)
                 continue
 
-            channel_name = item["channel"]["channelName"]
-            channel_icon = item["channel"].get("channelImageUrl")
+            channel_name = channel.get("channelName") or "알 수 없음"
+            channel_icon = channel.get("channelImageUrl")
             live_info = item.get("liveInfo", {})
 
             title = live_info.get("liveTitle")
@@ -625,6 +708,7 @@ async def check_loop():
                 if open_ts:
                     live_replay_links = state.get("live_replay_links", {})
                     channel_replay_state = live_replay_links.get(channel_id, {})
+                    channel_replay_state["open_ts"] = open_ts
                     if not channel_replay_state.get("mid_replay_url") and int(datetime.now().timestamp()) >= open_ts + 17 * 3600:
                         replay_videos = await fetch_replay_videos(channel_id)
                         if replay_videos:
@@ -707,31 +791,27 @@ async def check_loop():
                     raw_tags = detail.get("tags")
                     tags = raw_tags if isinstance(raw_tags, list) else []
 
-            if detail is None:
-                detail = await fetch_live_detail(channel_id)
-            if detail:
-                open_date_str = detail.get("openDate")
-                if open_date_str:
-                    open_ts = to_unix_kst(open_date_str)
-                    live_replay_links = state.get("live_replay_links", {})
-                    channel_replay_state = live_replay_links.get(channel_id, {})
-                    if not channel_replay_state.get("mid_replay_url") and int(datetime.now().timestamp()) >= open_ts + 17 * 3600:
-                        replay_videos = await fetch_replay_videos(channel_id)
-                        if replay_videos:
-                            mid_replay = select_replay_video(
-                                replay_videos,
-                                after_ts=open_ts + 17 * 3600,
-                                prefer_latest=False
-                            )
-                            if mid_replay:
-                                mid_replay_id = mid_replay.get("videoNo")
-                                if mid_replay_id:
-                                    mid_replay_url = f"https://chzzk.naver.com/video/{mid_replay_id}"
-                                    channel_replay_state["mid_replay_url"] = mid_replay_url
-                                    channel_replay_state["mid_replay_id"] = mid_replay_id
-                                    live_replay_links[channel_id] = channel_replay_state
-                                    state["live_replay_links"] = live_replay_links
-                                    save_json(STATE_FILE, state)
+            # 상세 응답은 제목/카테고리 변경 때만 요청하며, 실패 후 즉시 재요청하지 않음.
+            live_replay_links = state.get("live_replay_links", {})
+            channel_replay_state = live_replay_links.get(channel_id, {})
+            if detail and detail.get("openDate"):
+                parsed_open_ts = to_unix_kst(detail.get("openDate"))
+                if parsed_open_ts is not None:
+                    channel_replay_state["open_ts"] = parsed_open_ts
+            open_ts = channel_replay_state.get("open_ts")
+            # detail API는 정보가 바뀌거나 시작 시에만 호출. 17시간 다시보기 확인은 저장된 시작 시각 사용.
+            if open_ts and not channel_replay_state.get("mid_replay_url") and int(datetime.now().timestamp()) >= open_ts + 17 * 3600:
+                replay_videos = await fetch_replay_videos(channel_id)
+                if replay_videos:
+                    mid_replay = select_replay_video(replay_videos, after_ts=open_ts + 17 * 3600, prefer_latest=False)
+                    if mid_replay:
+                        mid_replay_id = mid_replay.get("videoNo")
+                        if mid_replay_id:
+                            channel_replay_state["mid_replay_url"] = f"https://chzzk.naver.com/video/{mid_replay_id}"
+                            channel_replay_state["mid_replay_id"] = mid_replay_id
+            if channel_replay_state:
+                live_replay_links[channel_id] = channel_replay_state
+                state["live_replay_links"] = live_replay_links
 
             tags_changed = sorted(old_tags) != sorted(tags)
 
@@ -775,6 +855,15 @@ async def check_loop():
         ended_streams = previous_live_ids - current_live_ids
 
         for channel_id in ended_streams:
+            # 각 종료 항목을 독립 초기화해 이전 채널의 지역 변수를 재사용하지 않음
+            channel_name = "알 수 없음"
+            channel_icon = None
+            open_ts = None
+            close_ts = None
+            initial_replay_urls = []
+            initial_replay_ids = []
+            mid_replay_url = None
+            end_message = None
             detail = await fetch_live_detail(channel_id)
 
             if detail:
@@ -811,8 +900,6 @@ async def check_loop():
                 embed.set_footer(text="Cheeeezzk")
                 embed.timestamp = discord.utils.utcnow()
 
-                initial_replay_urls = []
-                initial_replay_ids = []
                 mid_replay_state = state.get("live_replay_links", {}).get(channel_id, {})
                 mid_replay_url = mid_replay_state.get("mid_replay_url")
                 if mid_replay_url:
@@ -821,8 +908,8 @@ async def check_loop():
                     if mid_replay_id:
                         initial_replay_ids.append(mid_replay_id)
 
-                replay_videos = await fetch_replay_videos(channel_id)
-                if replay_videos:
+                replay_videos = await fetch_replay_videos(channel_id) if close_ts is not None else []
+                if replay_videos and close_ts is not None:
                     end_replay = select_replay_video(
                         replay_videos,
                         after_ts=close_ts,
@@ -843,6 +930,24 @@ async def check_loop():
                     view=build_action_view(channel_id, replay_url=initial_replay_urls, replay_disabled=not initial_replay_urls)
                 )
                 print(f"**{channel_name}** 라이브 종료")
+            else:
+                # 상세 API가 실패해도 채널명/시간 정보 없이 종료 알림 자체는 전달
+                state.get("live_replay_links", {}).pop(channel_id, None)
+                embed = discord.Embed(
+                    title="알 수 없음님의 방송이 종료되었습니다!",
+                    url=f"https://chzzk.naver.com/{channel_id}",
+                    description="라이브가 종료되었습니다. 방송 상세 정보를 가져오지 못했습니다.",
+                    color=16718891
+                )
+                embed.add_field(name="방송 시간", value="시간 정보 없음", inline=True)
+                embed.add_field(name="업타임", value="시간 정보 없음", inline=True)
+                embed.set_footer(text="Cheeeezzk")
+                embed.timestamp = discord.utils.utcnow()
+                end_message = await disc_channel.send(
+                    embed=embed,
+                    view=build_action_view(channel_id, replay_url=[], replay_disabled=True)
+                )
+                print(f"**{channel_id}** 라이브 종료 (상세 정보 없음)")
 
             state["last_live"][channel_id] = False
             state["last_live_event_id"].pop(channel_id, None)
@@ -855,20 +960,20 @@ async def check_loop():
                 except Exception:
                     replay_wait_until = None
 
-            track_key = f"{channel_id}:{int(datetime.now().timestamp())}:{open_ts if 'open_ts' in locals() else 0}"
+            track_key = f"{channel_id}:{int(datetime.now().timestamp())}:{open_ts or 0}"
             state["replay_tracking"][track_key] = {
                 "channel_id": channel_id,
-                "expires_at": int(datetime.now().timestamp()) + 20 * 60,
+                "expires_at": int(datetime.now().timestamp()) + 20 * 60 if close_ts is not None else int(datetime.now().timestamp()),
                 "seen_video_ids": initial_replay_ids,
-                "message_id": end_message.id if 'end_message' in locals() else None,
+                "message_id": end_message.id if end_message else None,
                 "notify_channel_id": config["notify_channel"],
                 "activated": False,
                 "replay_urls": initial_replay_urls,
                 "replay_url": initial_replay_urls[-1] if initial_replay_urls else None,
                 "mid_replay_url": mid_replay_url,
                 "wait_until": replay_wait_until,
-                "open_ts": open_ts if 'open_ts' in locals() else None,
-                "close_ts": close_ts if 'close_ts' in locals() else None
+                "open_ts": open_ts,
+                "close_ts": close_ts
             }
 
         save_json(STATE_FILE, state)
@@ -896,11 +1001,17 @@ async def community_loop():
             continue
 
         new_comments = []
+        seen_in_response = set(state["community_seen_comments"])
         for item in community_posts:
-            comment = item.get("comment", {})
-            comment_id = comment.get("commentId")
-            if not comment_id or comment_id in state["community_seen_comments"]:
+            if not isinstance(item, dict):
                 continue
+            comment = item.get("comment", {})
+            if not isinstance(comment, dict):
+                continue
+            comment_id = comment.get("commentId")
+            if not comment_id or comment_id in seen_in_response:
+                continue
+            seen_in_response.add(comment_id)
             new_comments.append(item)
 
         if new_comments:
@@ -951,6 +1062,8 @@ async def community_loop():
                 print(f"커뮤니티 새 글 알림: {comment_id} ({nickname})")
 
                 state["community_seen_comments"].append(comment_id)
+                state["community_seen_comments"] = state["community_seen_comments"][-5000:]
+                save_json(STATE_FILE, state)
 
             save_json(STATE_FILE, state)
 
@@ -1051,27 +1164,23 @@ async def help(interaction: discord.Interaction):
 
 # -------------------------
 
+async def supervise_loop(loop_factory, name):
+    """루프 예외를 기록하고 task가 끝나면 지연 후 재시작합니다."""
+    while not client.is_closed():
+        try:
+            await loop_factory()
+            if not client.is_closed():
+                print(f"{name} 작업이 예기치 않게 종료되어 재시작합니다")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"{name} 작업 오류, 재시작 예정:", repr(e))
+        await asyncio.sleep(5)
+
+
 @client.event
 async def on_ready():
-    global session, check_task, community_task
-
-    await tree.sync()
-
-    # 이미 사용 중인 세션이 있으면 재사용
-    if session is None or session.closed:
-        session = aiohttp.ClientSession()
-
     print(f"Logged in as {client.user}")
-
-    # Discord 재연결 등으로 on_ready()가 다시 호출되어도
-    # 기존 작업이 살아 있다면 새 작업을 만들지 않음
-    if check_task is None or check_task.done():
-        check_task = asyncio.create_task(check_loop())
-        print("라이브 알림 체크 작업 시작")
-
-    if community_task is None or community_task.done():
-        community_task = asyncio.create_task(community_loop())
-        print("커뮤니티 알림 체크 작업 시작")
 
 @client.event
 async def on_guild_join(guild):
